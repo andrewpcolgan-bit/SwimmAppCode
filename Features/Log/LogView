@@ -1,0 +1,870 @@
+//
+//  LogView.swift
+//  SwimSetTracker
+//
+
+import SwiftUI
+import PhotosUI
+import Vision
+import UIKit
+import Charts
+import PDFKit
+
+// MARK: - LogView (Main Journal Tab)
+struct LogView: View {
+    @EnvironmentObject var appData: AppData
+
+    // MARK: - States
+    @State private var selectedPhoto: PhotosPickerItem? = nil
+    @State private var showCamera = false
+    @State private var selectedImage: UIImage? = nil
+    @State private var recognizedText: String? = nil
+
+    @State private var progress: Double = 0.0
+    @State private var progressTimer: Timer? = nil
+
+    @State private var generatedPDFURL: URL? = nil
+    @State private var showPDFPreview = false
+
+    @State private var isAnalyzing = false
+    @State private var analyzeDonePulse = false
+    @State private var showSaveToast = false
+
+    @State private var aiPractice: AnalyzedPractice? = nil
+    @State private var analysisError: String? = nil
+    @State private var shareURL: URL? = nil
+
+    @State private var editedDate: Date = Date()
+    @State private var editedDuration: Int = 0
+    @State private var editedTime: Date = Date()
+
+    // Navigate to PracticeDetail
+    @State private var practiceToShow: AnalyzedPractice? = nil
+
+    // Editor for goals (yards + sessions + training phase presets)
+    @State private var showGoalEditor = false
+
+    // MARK: - Body
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 18) {
+
+                    // MARK: - Log Header + Weekly Summary (Mon→Sun + training-phase pill)
+                    weeklySummaryCard
+
+                    // MARK: - Upload / Analyze
+                    uploadAnalyzeCard
+
+                    // MARK: - Last Practice
+                    if let last = appData.mostRecentPractice() {
+                        lastPracticeCard(last)
+                    }
+
+                    // MARK: - Weekly Goal (PRO – rings + edit)
+                    weeklyGoalProCard
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 12)
+            }
+            .background(Color.black.ignoresSafeArea())
+            .navigationTitle("Log")
+            .navigationDestination(item: $practiceToShow) { practice in
+                PracticeDetailView(practice: practice)
+                    .environmentObject(appData)
+            }
+            .sheet(isPresented: $showGoalEditor) {
+                GoalEditorView().environmentObject(appData)
+            }
+            .sheet(isPresented: $showCamera) {
+                CameraPicker { img in
+                    selectedImage = img
+                    recognizedText = nil
+                    aiPractice = nil
+                    analysisError = nil
+                    isAnalyzing = true
+                    OCRService().extractText(from: img) { text in
+                        DispatchQueue.main.async {
+                            recognizedText = text
+                            isAnalyzing = false
+                        }
+                    }
+                }
+            }
+            .onChange(of: selectedPhoto) { _, newItem in
+                handlePhotoSelection(newItem)
+            }
+            .fullScreenCover(isPresented: $showPDFPreview) {
+                if let url = generatedPDFURL {
+                    PDFViewer(url: url)
+                } else {
+                    Text("No PDF available").foregroundColor(.white)
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if showSaveToast, let saved = appData.recentlySavedPractice {
+                    SaveToastView(practice: saved) {
+                        practiceToShow = saved
+                        withAnimation { showSaveToast = false }
+                        appData.recentlySavedPractice = nil
+                    }
+                    .padding(.horizontal)
+                    .padding(.bottom, 24)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+        }
+    }
+
+    // MARK: - WEEKLY SUMMARY + HEADER (Mon→Sun)
+    private var weeklySummaryCard: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 10) {
+
+                // Title + subtitle + Training Phase pill (stored in WeeklyGoal.notes)
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Log")
+                            .font(.title2.weight(.bold))
+                            .foregroundStyle(.white)
+
+                        Text("Scan a practice sheet or add one manually.")
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.75))
+                    }
+
+                    Spacer()
+
+                    if let phase = appData.weeklyGoal?.notes,
+                       !phase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(phase)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(Color.white.opacity(0.12), in: Capsule())
+                            .accessibilityLabel("Training Phase")
+                    }
+                }
+
+                // Totals for current ISO week (Mon→Sun)
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("\(appData.totalYards(in: appData.currentWeekInterval()))")
+                            .font(.system(size: 32, weight: .heavy, design: .rounded))
+                            .foregroundStyle(.white)
+                        Text("yds this week")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.78))
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Text("\(appData.practiceCount(in: appData.currentWeekInterval()))")
+                            .font(.system(size: 32, weight: .heavy, design: .rounded))
+                            .foregroundStyle(.white)
+                        Text("sessions")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.78))
+                    }
+                }
+
+                Divider().background(.white.opacity(0.24))
+
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Average Distance")
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.72))
+                        Text("\(averageDistance()) yds")
+                            .font(.subheadline.bold())
+                            .foregroundStyle(Color.appAccent)
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text("Total Time")
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.72))
+                        Text(appData.formattedSwimTime(in: appData.currentWeekInterval()))
+                            .font(.subheadline.bold())
+                            .foregroundStyle(Color.appAccent.opacity(0.85))
+                    }
+                }
+            }
+            .padding(16)
+        }
+    }
+
+    // MARK: - WEEKLY GOAL – Pro card with rings + pacing + edit
+    private var weeklyGoalProCard: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 10) {
+
+                HStack(spacing: 8) {
+                    Image(systemName: "target")
+                        .foregroundStyle(Color.appAccent)
+                    Text("Weekly Goal")
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Spacer()
+                    Button {
+                        showGoalEditor = true
+                    } label: {
+                        Image(systemName: "slider.horizontal.3")
+                            .foregroundStyle(.white.opacity(0.9))
+                            .padding(8)
+                            .background(Color.white.opacity(0.08), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Edit goal")
+                }
+
+                if let g = appData.weeklyGoal {
+                    // progress numbers for current week
+                    let p = appData.currentWeekGoalProgress()
+                    let showYards = (g.yardsTarget ?? 0) > 0
+                    let showSessions = (g.sessionsTarget ?? 0) > 0
+
+                    HStack(spacing: 28) {
+                        if showYards {
+                            MiniRing(
+                                percent: percent(done: p.yardsDone, target: g.yardsTarget ?? 0),
+                                title: "Yards",
+                                detail: "\(p.yardsDone.formatted()) / \((g.yardsTarget ?? 0).formatted())",
+                                size: 120,
+                                lineWidth: 12
+                            )
+                        }
+                        if showSessions {
+                            MiniRing(
+                                percent: percent(done: p.sessionsDone, target: g.sessionsTarget ?? 0),
+                                title: "Sessions",
+                                detail: "\(p.sessionsDone) / \(g.sessionsTarget ?? 0)",
+                                size: 120,
+                                lineWidth: 12
+                            )
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 6)
+
+                    // pacing hint (yards only for now)
+                    if let hint = appData.yardsPacingHint() {
+                        Text(hint)
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.78))
+                            .padding(.top, 2)
+                    }
+                } else {
+                    // No goal set yet
+                    HStack {
+                        Text("No weekly goal set")
+                            .foregroundStyle(.white.opacity(0.75))
+                        Spacer()
+                        Button("Set Goal") { showGoalEditor = true }
+                            .font(.footnote.weight(.semibold))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(Color.white.opacity(0.10), in: Capsule())
+                    }
+                }
+            }
+            .padding(16)
+        }
+    }
+
+    // MARK: - UPLOAD ANALYZE CARD
+    private var uploadAnalyzeCard: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Image(systemName: "plus.circle.fill")
+                    Text("Log New Practice")
+                }
+                .font(.headline)
+                .foregroundStyle(.white)
+
+                Text("Snap or upload a set to analyze instantly.")
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.7))
+
+                HStack(spacing: 10) {
+                    Button { showCamera = true } label: {
+                        Label("Use Camera", systemImage: "camera.fill")
+                            .fontWeight(.semibold)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(ActionPillButtonStyle(prominent: true))
+
+                    PhotosPicker(selection: $selectedPhoto, matching: .images) {
+                        Label("Upload Photo", systemImage: "photo.on.rectangle")
+                            .fontWeight(.semibold)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(ActionPillButtonStyle(prominent: false))
+                }
+
+                if let image = selectedImage {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.08)))
+                        .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 3)
+                }
+
+                if let text = recognizedText {
+                    Button { analyze(text: text) } label: {
+                        Label("Analyze Practice", systemImage: "bolt.fill")
+                            .fontWeight(.semibold)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(ActionPillButtonStyle(prominent: true))
+                    .padding(.top, 6)
+                }
+
+                if isAnalyzing {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Analyzing your workout…")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.8))
+
+                        ProgressView(value: progress)
+                            .progressViewStyle(.linear)
+                            .tint(Color.appAccent)
+                            .frame(height: 6)
+                            .clipShape(Capsule())
+                    }
+                    .padding(.top, 8)
+                }
+
+                if let p = aiPractice { analysisOutput(p) }
+
+                if let err = analysisError {
+                    Text("⚠️ \(err)")
+                        .font(.footnote)
+                        .foregroundColor(.red)
+                }
+            }
+            .padding(16)
+        }
+    }
+
+    // MARK: - LAST PRACTICE CARD
+    private func lastPracticeCard(_ last: AnalyzedPractice) -> some View {
+        let now = Date()
+        let iso = ISO8601DateFormatter()
+        let date = iso.date(from: last.date)
+
+        var statusText: String? = nil
+        var statusColor: Color = .clear
+
+        if let d = date {
+            let hours = now.timeIntervalSince(d) / 3600.0
+            if hours <= 12 { statusText = "You’re on a roll."; statusColor = .green }
+            else if hours <= 24 { statusText = "You swam earlier today."; statusColor = .appAccent }
+            else if hours >= 48 { statusText = "It’s been a bit since your last swim."; statusColor = .orange }
+        }
+
+        let mainStroke: (key: String, value: Double)? = last.strokePercentages.max(by: { $0.value < $1.value })
+
+        return GlassCard {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "clock.arrow.circlepath")
+                    Text("Last Practice")
+                }
+                .font(.headline)
+                .foregroundStyle(.white)
+
+                if let d = date {
+                    Text("\(d.formatted(.dateTime.weekday(.wide).month().day().year())) • \(last.timeOfDay ?? "")")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+
+                AccentDivider()
+
+                HStack {
+                    Text("\(last.distanceYards) yds")
+                        .font(.title3.bold())
+                        .foregroundStyle(Color.appAccent)
+                    Text("•")
+                        .foregroundStyle(.white.opacity(0.5))
+                    Text("\(last.durationMinutes) min")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                    Spacer()
+                }
+
+                if let strokeInfo = mainStroke, strokeInfo.value > 0 {
+                    Text("Main stroke: \(strokeInfo.key) (\(Int(round(strokeInfo.value)))%)")
+                        .font(.footnote)
+                        .foregroundStyle(.white.opacity(0.8))
+                }
+
+                if !last.sectionYards.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(["Warmup", "Preset", "Main Set", "Post-Set", "Cooldown"], id: \.self) { section in
+                            if let yds = last.sectionYards.first(where: {
+                                $0.key.localizedCaseInsensitiveContains(section.replacingOccurrences(of: "-", with: " "))
+                                || $0.key.localizedCaseInsensitiveContains(section)
+                            })?.value {
+                                HStack {
+                                    Text(section)
+                                        .font(.footnote.weight(.semibold))
+                                        .foregroundStyle(.white.opacity(0.85))
+                                        .frame(width: 90, alignment: .leading)
+                                    Text("\(yds) yds")
+                                        .font(.footnote)
+                                        .foregroundStyle(.white.opacity(0.7))
+                                    Spacer()
+                                }
+                            }
+                        }
+                    }
+                    .padding(.top, 2)
+                }
+
+                if let statusText {
+                    Text(statusText)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(statusColor)
+                        .padding(.top, 4)
+                }
+
+                HStack {
+                    Spacer()
+                    Button {
+                        practiceToShow = last
+                    } label: {
+                        Text("View breakdown")
+                            .font(.footnote.weight(.semibold))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(Color.white.opacity(0.08), in: Capsule())
+                    }
+                }
+            }
+            .padding(16)
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(statusColor.opacity(statusText == nil ? 0 : 0.6),
+                        lineWidth: statusText == nil ? 0 : 2)
+        )
+    }
+
+    // MARK: - ANALYSIS LOGIC
+    private func analyze(text: String) {
+        analysisError = nil
+        aiPractice = nil
+        isAnalyzing = true
+        analyzeDonePulse = false
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+
+        startFakeProgress(for: text)
+
+        AnalyzeService().analyze(text: text) { result in
+            DispatchQueue.main.async {
+                progressTimer?.invalidate()
+                isAnalyzing = false
+                progress = 1.0
+
+                switch result {
+                case .success(let practice):
+                    var p = practice
+                    let parsed = extractDate(from: p.formattedText)
+                        ?? (recognizedText.flatMap { extractDate(from: $0) })
+
+                    if let d = parsed {
+                        editedDate = d
+                        p = overridePracticeDate(p, with: d)
+                    } else {
+                        editedDate = Date()
+                    }
+
+                    editedDuration = p.durationMinutes
+                    aiPractice = p
+
+                    withAnimation(.spring(response: 0.5, dampingFraction: 0.6)) {
+                        analyzeDonePulse = true
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                        withAnimation { analyzeDonePulse = false }
+                    }
+
+                case .failure(let err):
+                    print("❌ Analyze error:", err.description)
+                    analysisError = userFacingErrorText(from: err.description)
+                    UINotificationFeedbackGenerator().notificationOccurred(.error)
+                }
+            }
+        }
+    }
+
+    // MARK: - PRACTICE DETAIL OUTPUT
+    private func analysisOutput(_ p: AnalyzedPractice) -> some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Practice Overview", systemImage: "list.bullet.rectangle.portrait")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+
+                DatePicker("Date", selection: $editedDate, displayedComponents: [.date])
+                    .datePickerStyle(.compact)
+                    .colorScheme(.dark)
+
+                DatePicker("Time", selection: $editedTime, displayedComponents: [.hourAndMinute])
+                    .datePickerStyle(.compact)
+                    .colorScheme(.dark)
+
+                HStack {
+                    Image(systemName: "timer")
+                    Stepper(value: $editedDuration, in: 0...600, step: 15) {
+                        Text("Duration: \(editedDuration) min")
+                            .font(.subheadline)
+                            .foregroundStyle(.white)
+                            .monospacedDigit()
+                    }
+                }
+
+                Text("Total Distance: \(p.distanceYards) yds")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+
+                ForEach(["Warmup", "Preset", "Main Set", "Post-Set", "Cooldown"], id: \.self) { key in
+                    if let yds = p.sectionYards[key] {
+                        Text("• \(key): \(yds) yds")
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.7))
+                    }
+                }
+
+                Button {
+                    savePracticeFlow(p)
+                } label: {
+                    Label("Save Practice", systemImage: "tray.and.arrow.down.fill")
+                        .fontWeight(.semibold)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Color.appAccent)
+            }
+            .padding(16)
+        }
+    }
+
+    // MARK: - SAVE PRACTICE
+    private func savePracticeFlow(_ p: AnalyzedPractice) {
+        var copy = overridePracticeDate(p, with: editedDate)
+        copy = overridePracticeDuration(copy, minutes: editedDuration)
+
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        let timeString = formatter.string(from: editedTime)
+        copy = overridePracticeTime(copy, timeOfDay: timeString)
+
+        if let text = recognizedText {
+            if let pdfURL = PracticeSheetPDFGenerator.generateSheetPDF(from: text, practiceID: p.id) {
+                appData.savePracticePDF(pdfURL, for: p.id)
+                print("📄 Printable clean PDF generated for:", p.id)
+            }
+        } else {
+            print("⚠️ No image selected — skipping PDF.")
+        }
+
+        appData.addPractice(copy)
+        appData.recentlySavedPractice = copy
+
+        resetInputs()
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+
+        withAnimation { showSaveToast = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
+            if showSaveToast {
+                withAnimation { showSaveToast = false }
+                appData.recentlySavedPractice = nil
+            }
+        }
+    }
+
+    // MARK: - Photo Handler
+    private func handlePhotoSelection(_ newItem: PhotosPickerItem?) {
+        guard let newItem else { return }
+        Task {
+            if let data = try? await newItem.loadTransferable(type: Data.self),
+               let uiImage = UIImage(data: data) {
+
+                selectedImage = uiImage
+                recognizedText = nil
+                aiPractice = nil
+                analysisError = nil
+
+                isAnalyzing = true
+                OCRService().extractText(from: uiImage) { text in
+                    DispatchQueue.main.async {
+                        recognizedText = text
+                        isAnalyzing = false
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Practice Overrides
+    private func overridePracticeDate(_ p: AnalyzedPractice, with date: Date) -> AnalyzedPractice {
+        AnalyzedPractice(
+            id: p.id,
+            date: ISO8601DateFormatter().string(from: date),
+            formattedText: p.formattedText,
+            aiSummary: p.aiSummary,
+            distanceYards: p.distanceYards,
+            durationMinutes: p.durationMinutes,
+            sectionYards: p.sectionYards,
+            strokePercentages: p.strokePercentages,
+            aiTip: p.aiTip,
+            timeOfDay: p.timeOfDay,
+            practiceTag: p.practiceTag,
+            recoverySuggestions: p.recoverySuggestions
+        )
+    }
+
+    private func overridePracticeDuration(_ p: AnalyzedPractice, minutes: Int) -> AnalyzedPractice {
+        AnalyzedPractice(
+            id: p.id,
+            date: p.date,
+            formattedText: p.formattedText,
+            aiSummary: p.aiSummary,
+            distanceYards: p.distanceYards,
+            durationMinutes: minutes,
+            sectionYards: p.sectionYards,
+            strokePercentages: p.strokePercentages,
+            aiTip: p.aiTip,
+            timeOfDay: p.timeOfDay,
+            practiceTag: p.practiceTag,
+            recoverySuggestions: p.recoverySuggestions
+        )
+    }
+
+    private func overridePracticeTime(_ p: AnalyzedPractice, timeOfDay: String) -> AnalyzedPractice {
+        AnalyzedPractice(
+            id: p.id,
+            date: p.date,
+            formattedText: p.formattedText,
+            aiSummary: p.aiSummary,
+            distanceYards: p.distanceYards,
+            durationMinutes: p.durationMinutes,
+            sectionYards: p.sectionYards,
+            strokePercentages: p.strokePercentages,
+            aiTip: p.aiTip,
+            timeOfDay: timeOfDay,
+            practiceTag: p.practiceTag,
+            recoverySuggestions: p.recoverySuggestions
+        )
+    }
+
+    // MARK: - Helpers
+
+    /// Average yards per practice for the **current ISO week (Mon→Sun)**.
+    private func averageDistance() -> Int {
+        let interval = appData.currentWeekInterval()
+        let count = appData.practiceCount(in: interval)
+        guard count > 0 else { return 0 }
+        let total = appData.totalYards(in: interval)
+        return total / count
+    }
+
+    /// Turn low-level error strings into user-friendly text.
+    private func userFacingErrorText(from raw: String) -> String {
+        if raw.contains("Network error") {
+            return "Network error. Check your connection and try again."
+        } else if raw.localizedCaseInsensitiveContains("overloaded")
+                    || raw.localizedCaseInsensitiveContains("UNAVAILABLE") {
+            return "Our AI servers are really busy right now. Your photo looks fine—try again in a bit."
+        } else if raw.contains("Server error") {
+            return "The analyzer had trouble with this image. Try cropping closer or retaking the photo."
+        } else if raw.contains("Decode error") || raw.contains("Unexpected data format") {
+            return "The AI response came back in an unexpected format. Please try again."
+        } else if raw.contains("Missing BACKEND_ANALYZE_URL") {
+            return "App is missing its backend URL. Please check the configuration."
+        } else {
+            return raw
+        }
+    }
+
+    private func startFakeProgress(for text: String) {
+        progress = 0.0
+        progressTimer?.invalidate()
+
+        // ~20 seconds to 90%, smooth linear motion
+        let totalDuration = 20.0
+        let interval = 0.025
+        let targetProgress = 0.9
+        let increment = (targetProgress / (totalDuration / interval))
+
+        progressTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { timer in
+            if progress < targetProgress {
+                withAnimation(.linear(duration: interval)) {
+                    progress += increment
+                }
+            } else {
+                timer.invalidate()
+            }
+        }
+    }
+
+    private func resetInputs() {
+        selectedPhoto = nil
+        selectedImage = nil
+        recognizedText = nil
+        aiPractice = nil
+        analysisError = nil
+        shareURL = nil
+        editedDuration = 0
+        editedDate = Date()
+    }
+
+    // MARK: - Tiny ring used in Weekly Goal card
+    private func percent(done: Int, target: Int) -> Double {
+        guard target > 0 else { return 0 }
+        return min(1.0, max(0.0, Double(done) / Double(target)))
+    }
+
+    private struct MiniRing: View {
+        let percent: Double           // 0...1
+        let title: String
+        let detail: String
+        var size: CGFloat = 120       // larger ring
+        var lineWidth: CGFloat = 12   // thicker stroke
+
+        var body: some View {
+            VStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .stroke(lineWidth: lineWidth)
+                        .opacity(0.15)
+                        .foregroundStyle(Color.appAccent)
+
+                    Circle()
+                        .trim(from: 0, to: max(0, min(1, percent)))
+                        .stroke(Color.appAccent, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+
+                    VStack(spacing: 2) {
+                        Text("\(Int(round(percent * 100)))%")
+                            .font(.system(size: 22, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .minimumScaleFactor(0.8)
+
+                        Text(detail)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.white.opacity(0.75))
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 6)
+                }
+                .frame(width: size, height: size)
+
+                Text(title)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.9))
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(title) \(Int(round(percent * 100))) percent. \(detail)")
+        }
+    }
+
+}
+
+// MARK: - Date parsing helpers
+private func extractDate(from text: String) -> Date? {
+    let patterns = [
+        #"\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b"#,
+        #"\b([A-Za-z]{3,9})\s+(\d{1,2})(?:,\s*)?(\d{2,4})\b"#
+    ]
+
+    let ns = text as NSString
+    for pat in patterns {
+        guard
+            let rx = try? NSRegularExpression(pattern: pat, options: .caseInsensitive),
+            let m = rx.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)),
+            m.numberOfRanges == 4
+        else { continue }
+
+        let g1 = ns.substring(with: m.range(at: 1))
+        let g2 = ns.substring(with: m.range(at: 2))
+        let g3 = ns.substring(with: m.range(at: 3))
+        return DateComponentsParser.parse(monthOrNumber: g1, dayOrMonth: g2, year: g3)
+    }
+    return nil
+}
+
+private enum DateComponentsParser {
+    static func parse(monthOrNumber: String, dayOrMonth: String, year: String) -> Date? {
+        let cal = Calendar.current
+        if let m = Int(monthOrNumber), let d = Int(dayOrMonth) {
+            return DateComponents(calendar: cal, year: normalizeYear(year), month: m, day: d).date
+        } else {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "en_US_POSIX")
+            f.dateFormat = "MMM d yyyy"
+            return f.date(from: "\(monthOrNumber.capitalized) \(dayOrMonth) \(normalizeYear(year))")
+        }
+    }
+
+    private static func normalizeYear(_ y: String) -> Int {
+        if let yy = Int(y), yy < 100 { return 2000 + yy }
+        return Int(y) ?? Calendar.current.component(.year, from: Date())
+    }
+}
+
+// MARK: - UI bits
+private struct AccentDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(LinearGradient(colors: [.white.opacity(0.15), .white.opacity(0.05)],
+                                 startPoint: .leading, endPoint: .trailing))
+            .frame(height: 1)
+    }
+}
+
+private struct ActionPillButtonStyle: ButtonStyle {
+    var prominent: Bool
+    var tint: Color = .appAccent
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.subheadline)
+            .padding(.vertical, 10)
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity)
+            .background(
+                (prominent ? tint.opacity(configuration.isPressed ? 0.75 : 0.9)
+                           : Color.white.opacity(configuration.isPressed ? 0.12 : 0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+            )
+            .foregroundStyle(.white)
+    }
+}
+
+private struct SaveToastView: View {
+    let practice: AnalyzedPractice
+    let onTap: () -> Void
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 12) {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Practice saved").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                    Text("Tap to view breakdown").font(.caption).foregroundStyle(.white.opacity(0.8))
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(.ultraThinMaterial.opacity(0.95))
+            .clipShape(Capsule())
+            .shadow(radius: 8)
+        }
+        .buttonStyle(.plain)
+    }
+}
