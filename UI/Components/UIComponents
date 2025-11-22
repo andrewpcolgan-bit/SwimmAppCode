@@ -1,0 +1,97 @@
+//
+//  UIComponents.swift
+//  SwimSetTracker
+//
+
+import SwiftUI
+
+// MARK: - Reusable UI Components
+
+struct AppCard<Content: View>: View {
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            content()
+        }
+        .padding(16)
+        .background(Color(.systemGray5))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .shadow(color: Color.black.opacity(0.06), radius: 8, x: 0, y: 4)
+    }
+}
+
+struct CardHeader: View {
+    let title: String
+    init(_ title: String) { self.title = title }
+
+    var body: some View {
+        Text(title)
+            .font(.headline)
+            .foregroundStyle(.primary)
+            .padding(.bottom, 2)
+    }
+}
+
+struct LegendRow: View {
+    let color: Color
+    let title: String
+    let detail: String
+
+    var body: some View {
+        HStack {
+            Circle().fill(color).frame(width: 10, height: 10)
+            Text(title + ": ")
+                .font(.subheadline)
+            Text(detail)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+struct BreakdownStyledView: View {
+    let title: String
+    let sets: [String]
+    let totalYards: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(.teal)
+                Spacer()
+                Text("\(totalYards) yds")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(sets, id: \.self) { set in
+                    Text(set)
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundColor(.primary)
+                        .opacity(0.9)
+                }
+            }
+            .padding(.leading, 4)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.systemBackground).opacity(0.4))
+                .background(.ultraThinMaterial)
+                .shadow(radius: 2, y: 1)
+        )
+    }
+}
+import SwiftUI
+
+extension Color {
+    /// Primary accent color for the app.
+    /// Change this in one place if you later decide to retheme.
+    static let appAccent: Color = .teal   // or Color("AppAccent") if you add a color asset
+}
+
