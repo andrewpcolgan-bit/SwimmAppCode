@@ -1,0 +1,159 @@
+import Foundation
+
+// MARK: - Exact shape returned by your Vercel /api/analyze
+struct BackendAnalysisResult: Codable {
+    let totalYards: Int
+    let sectionYards: [String: Int]
+    let strokePercentages: [String: Double]
+
+    // From backend /api/analyze.js
+    let aiSummary: String?            // short overall summary
+    let aiTip: String?                // generic tip
+    let practiceTag: String?          // e.g. "sprint free", "aerobic IM"
+    let recoverySuggestions: String?  // full text block of stretches/recovery
+}
+
+// MARK: - Your existing app model
+struct SectionDetail: Codable, Identifiable {
+    var id: String { title }
+    let title: String
+    let lines: [String]
+    let totalYards: Int
+}
+
+struct AnalyzedPractice: Codable, Identifiable {
+    let id: String
+    let date: String
+    let formattedText: String
+    let aiSummary: String
+    let distanceYards: Int
+    let durationMinutes: Int
+    let sectionYards: [String: Int]
+    let strokePercentages: [String: Double]
+    let aiTip: String?
+    let timeOfDay: String?
+    let practiceTag: String?
+    let recoverySuggestions: String?
+}
+
+// MARK: - Error
+enum AnalyzeError: Error, CustomStringConvertible {
+    case message(String)
+
+    var description: String {
+        switch self {
+        case .message(let s): return s
+        }
+    }
+}
+
+// MARK: - Service
+final class AnalyzeService {
+
+    func analyze(text: String, completion: @escaping (Result<AnalyzedPractice, AnalyzeError>) -> Void) {
+        guard let url = AppConfig.backendAnalyzeURL else {
+            completion(.failure(.message("Missing BACKEND_ANALYZE_URL in Info.plist")))
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let body: [String: Any] = ["text": text]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                completion(.failure(.message("Network error: \(error.localizedDescription)")))
+                return
+            }
+
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            guard (200...299).contains(status) else {
+                let msg = String(data: data ?? Data(), encoding: .utf8) ?? "No body"
+                completion(.failure(.message("Server error \(status): \(msg)")))
+                return
+            }
+
+            guard let data = data else {
+                completion(.failure(.message("Empty response")))
+                return
+            }
+
+            do {
+                // Case 1: Backend already sent clean JSON in BackendAnalysisResult shape
+                if let backend = try? JSONDecoder().decode(BackendAnalysisResult.self, from: data) {
+                    let analyzed = self.makeAnalyzedPractice(from: backend, text: text)
+                    completion(.success(analyzed))
+                    return
+                }
+
+                // Case 2: Wrapped as {"rawOutput": "json\n{...}"}
+                struct Wrapper: Codable { let rawOutput: String }
+
+                if let wrapped = try? JSONDecoder().decode(Wrapper.self, from: data) {
+                    var cleaned = wrapped.rawOutput
+                        .replacingOccurrences(of: "```json", with: "")
+                        .replacingOccurrences(of: "```", with: "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                    // Strip leading "json" label that Gemini likes to add
+                    if cleaned.lowercased().hasPrefix("json") {
+                        cleaned = String(cleaned.dropFirst(4))
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+
+                    if let innerData = cleaned.data(using: .utf8),
+                       let backend = try? JSONDecoder().decode(BackendAnalysisResult.self, from: innerData) {
+                        let analyzed = self.makeAnalyzedPractice(from: backend, text: text)
+                        completion(.success(analyzed))
+                        return
+                    }
+                }
+
+                // Case 3: Raw string (non-wrapped)
+                if var string = String(data: data, encoding: .utf8) {
+                    string = string.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                    if string.lowercased().hasPrefix("json") {
+                        string = String(string.dropFirst(4))
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+
+                    if let innerData = string.data(using: .utf8),
+                       let backend = try? JSONDecoder().decode(BackendAnalysisResult.self, from: innerData) {
+                        let analyzed = self.makeAnalyzedPractice(from: backend, text: text)
+                        completion(.success(analyzed))
+                        return
+                    }
+                }
+
+                throw AnalyzeError.message("Unexpected data format")
+
+            } catch {
+                let raw = String(data: data, encoding: .utf8) ?? "?"
+                print("🔍 RAW RESPONSE:\n\(raw)")
+                completion(.failure(.message("Decode error: \(error.localizedDescription)\nRaw: \(raw)")))
+            }
+        }.resume()
+    }
+
+    // MARK: - Helper
+    private func makeAnalyzedPractice(from backend: BackendAnalysisResult, text: String) -> AnalyzedPractice {
+        AnalyzedPractice(
+            id: UUID().uuidString,
+            date: ISO8601DateFormatter().string(from: Date()),
+            formattedText: text,
+            aiSummary: backend.aiSummary ?? "No summary",
+            distanceYards: backend.totalYards,
+            durationMinutes: 0,
+            sectionYards: backend.sectionYards,
+            strokePercentages: backend.strokePercentages,
+            aiTip: backend.aiTip,
+            timeOfDay: "", // safe default since backend doesn't provide it
+            practiceTag: backend.practiceTag,
+            recoverySuggestions: backend.recoverySuggestions
+        )
+    }
+}
