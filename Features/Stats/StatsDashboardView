@@ -1,0 +1,1305 @@
+//
+//  StatsDashboardView.swift
+//  SwimSetTracker
+//
+
+import SwiftUI
+import Charts
+
+// MARK: - Models
+
+enum TileKind: String, Codable, CaseIterable {
+    case summary, weeklyProgress, strokeMix, sectionShare, cumulativeYards, avgSetLength, longestPractice
+}
+
+enum TileSize: String, Codable, CaseIterable { case small, medium, large }
+
+struct Tile: Identifiable, Codable, Equatable {
+    let id: UUID
+    var kind: TileKind
+    var isVisible: Bool
+    var size: TileSize
+}
+
+// MARK: - Time Range
+
+enum StatsRange: String, CaseIterable, Identifiable {
+    case thisWeek = "This Week"
+    case custom = "Custom Range"
+    var id: String { rawValue }
+}
+
+// MARK: - Dashboard
+
+struct StatsDashboardView: View {
+    @EnvironmentObject var appData: AppData
+
+    @AppStorage("statsTiles") private var tilesData: Data = Data()
+    @State private var tiles: [Tile] = []
+    @State private var isEditing = false
+    @State private var selectedTile: Tile? = nil
+    @State private var range: StatsRange = .thisWeek
+    @State private var showManage = false
+    @State private var effectiveRange: DateInterval? = nil
+
+    // Custom range state
+    @State private var customStartDate: Date? = Calendar.monday.date(byAdding: .day, value: -7, to: Date())
+    @State private var customEndDate: Date? = Date()
+
+    private let cols = [GridItem(.adaptive(minimum: 320), spacing: 14)]
+
+    // MARK: - Persistence
+
+    private func loadTiles() {
+        if let saved = try? JSONDecoder().decode([Tile].self, from: tilesData), !saved.isEmpty {
+            tiles = saved
+        } else {
+            tiles = [
+                Tile(id: UUID(), kind: .summary,        isVisible: true,  size: .large),
+                Tile(id: UUID(), kind: .weeklyProgress, isVisible: true,  size: .medium),
+                Tile(id: UUID(), kind: .strokeMix,      isVisible: true,  size: .medium),
+                Tile(id: UUID(), kind: .sectionShare,   isVisible: false, size: .medium),
+                Tile(id: UUID(), kind: .cumulativeYards,isVisible: false, size: .large),
+                Tile(id: UUID(), kind: .avgSetLength,   isVisible: false, size: .medium),
+                Tile(id: UUID(), kind: .longestPractice,isVisible: false, size: .small),
+            ]
+            persistTiles()
+        }
+    }
+
+    private func persistTiles() {
+        if let data = try? JSONEncoder().encode(tiles) {
+            tilesData = data
+        }
+    }
+
+    // MARK: - Date Range Logic
+
+    private func intervalForRange(_ r: StatsRange) -> DateInterval? {
+        let cal = Calendar.monday
+        switch r {
+        case .thisWeek:
+            guard let start = cal.dateInterval(of: .weekOfYear, for: Date())?.start,
+                  let end = cal.date(byAdding: .day, value: 7, to: start) else { return nil }
+            return DateInterval(start: start, end: end)
+        case .custom:
+            guard let start = customStartDate,
+                  let end = customEndDate,
+                  start <= end else {
+                return nil
+            }
+            return DateInterval(start: start, end: end)
+        }
+    }
+
+    // Debounce timer for smoother custom date selection
+    @State private var debounceWorkItem: DispatchWorkItem?
+
+    private func debounceUpdateCustomRange() {
+        debounceWorkItem?.cancel()
+        let workItem = DispatchWorkItem {
+            if range == .custom {
+                withAnimation(.easeInOut) {
+                    effectiveRange = intervalForRange(.custom)
+                }
+            }
+        }
+        debounceWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
+    }
+
+    // MARK: - Body
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 16) {
+                    // MARK: - Hero Header + Range Selector
+                    GlassCard {
+                        VStack(alignment: .leading, spacing: 16) {
+                            // Title row
+                            HStack(alignment: .top) {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "chart.bar.fill")
+                                            .foregroundStyle(.teal)
+                                        Text("Stats")
+                                            .font(.system(size: 28, weight: .heavy, design: .rounded))
+                                            .foregroundStyle(.white)
+                                    }
+
+                                    Text(range == .thisWeek ? "This week overview" : customRangeSubtitle())
+                                        .font(.subheadline)
+                                        .foregroundStyle(.white.opacity(0.7))
+                                }
+
+                                Spacer()
+
+                                Button {
+                                    showManage = true
+                                } label: {
+                                    Label("Edit Layout", systemImage: "slider.horizontal.3")
+                                        .font(.subheadline.weight(.semibold))
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 8)
+                                        .background(.ultraThinMaterial)
+                                        .foregroundStyle(.white)
+                                        .clipShape(Capsule())
+                                        .overlay(
+                                            Capsule().stroke(Color.white.opacity(0.25), lineWidth: 1)
+                                        )
+                                }
+                                .buttonStyle(.plain)
+                            }
+
+                            // Segmented picker in a glass capsule
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 12)
+                                    .fill(Color.white.opacity(0.08))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                                    )
+
+                                Picker("", selection: $range) {
+                                    ForEach(StatsRange.allCases) { r in
+                                        Text(r.rawValue).tag(r)
+                                    }
+                                }
+                                .pickerStyle(.segmented)
+                                .tint(.white)
+                                .padding(6)
+                            }
+                            .frame(height: 44)
+                            .animation(.easeInOut, value: range)
+
+                            // Custom date controls (only when needed)
+                            if range == .custom {
+                                VStack(spacing: 10) {
+                                    HStack(spacing: 12) {
+                                        ZStack {
+                                            RoundedRectangle(cornerRadius: 10)
+                                                .fill(Color.white.opacity(0.08))
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: 10)
+                                                        .stroke(Color.white.opacity(0.25), lineWidth: 1)
+                                                )
+                                            DatePicker("Start", selection: startBinding, displayedComponents: .date)
+                                                .labelsHidden()
+                                                .tint(.teal)
+                                                .padding(.horizontal, 8)
+                                        }
+                                        ZStack {
+                                            RoundedRectangle(cornerRadius: 10)
+                                                .fill(Color.white.opacity(0.08))
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: 10)
+                                                        .stroke(Color.white.opacity(0.25), lineWidth: 1)
+                                                )
+                                            DatePicker("End", selection: endBinding, displayedComponents: .date)
+                                                .labelsHidden()
+                                                .tint(.teal)
+                                                .padding(.horizontal, 8)
+                                        }
+                                    }
+
+                                    Button {
+                                        range = .thisWeek
+                                        customStartDate = Calendar.monday.date(byAdding: .day, value: -7, to: Date())
+                                        customEndDate = Date()
+                                    } label: {
+                                        Label("Clear Custom Range", systemImage: "arrow.counterclockwise")
+                                            .font(.caption)
+                                            .foregroundStyle(.teal)
+                                    }
+                                }
+                                .padding(.top, 4)
+                                .transition(.opacity.combined(with: .move(edge: .top)))
+                            }
+                        }
+                        .padding(16)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal)
+                    .shadow(color: .black.opacity(0.45), radius: 10, x: 0, y: 5)
+
+                    // MARK: - Grid of tiles
+                    let visible = tiles.filter(\.isVisible)
+                    if visible.isEmpty {
+                        EmptyState(onAdd: { showManage = true })
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 40)
+                    } else {
+                        LazyVGrid(columns: cols, spacing: 14) {
+                            ForEach(visible) { tile in
+                                StatsTileView(
+                                    tile: tile,
+                                    range: effectiveRange,
+                                    isEditing: isEditing,
+                                    onTap: { selectedTile = tile },
+                                    onMoveUp: { move(tile: tile, dir: -1) },
+                                    onMoveDown: { move(tile: tile, dir: 1) },
+                                    onToggleVisible: { toggleVisibility(tile) },
+                                    onResize: { cycleSize(tile) }
+                                )
+                            }
+                        }
+                        .animation(.easeInOut, value: tiles)
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 12)
+            }
+            .background(Color.black.ignoresSafeArea())
+            .navigationTitle("My Stats")
+            .tint(.teal)
+            .onAppear {
+                loadTiles()
+                effectiveRange = intervalForRange(range)
+            }
+            .onChange(of: range) { newValue in
+                withAnimation(.easeInOut) { effectiveRange = intervalForRange(newValue) }
+            }
+            .onChange(of: customStartDate) { _ in debounceUpdateCustomRange() }
+            .onChange(of: customEndDate) { _ in debounceUpdateCustomRange() }
+            .sheet(isPresented: $showManage) {
+                ManageTilesSheet(tiles: $tiles)
+                    .presentationDetents([.medium, .large])
+                    .onChange(of: tiles) { _ in persistTiles() }
+            }
+            .sheet(item: $selectedTile) { tile in
+                ExpandedTileSheet(tile: tile, range: effectiveRange)
+                    .environmentObject(appData)
+            }
+        }
+    }
+
+    // MARK: - Tile Management Helpers
+
+    private func idx(_ tile: Tile) -> Int? { tiles.firstIndex(of: tile) }
+
+    private func move(tile: Tile, dir: Int) {
+        guard let i = idx(tile) else { return }
+        let j = max(0, min(tiles.count - 1, i + dir))
+        guard i != j else { return }
+        withAnimation {
+            tiles.move(fromOffsets: IndexSet(integer: i), toOffset: j > i ? j + 1 : j)
+            persistTiles()
+        }
+    }
+
+    private func toggleVisibility(_ tile: Tile) {
+        guard let i = idx(tile) else { return }
+        tiles[i].isVisible.toggle()
+        persistTiles()
+    }
+
+    private func cycleSize(_ tile: Tile) {
+        guard let i = idx(tile) else { return }
+        let order: [TileSize] = [.small, .medium, .large]
+        if let k = order.firstIndex(of: tiles[i].size) {
+            tiles[i].size = order[(k + 1) % order.count]
+        }
+        persistTiles()
+    }
+
+    // MARK: - Bindings to adapt Date? to Date for DatePicker
+    private var startBinding: Binding<Date> {
+        Binding(
+            get: {
+                if let d = customStartDate { return d }
+                return Calendar.monday.date(byAdding: .day, value: -7, to: Date()) ?? Date()
+            },
+            set: { newValue in
+                customStartDate = newValue
+                if let end = customEndDate, newValue > end { customEndDate = newValue }
+                debounceUpdateCustomRange()
+            }
+        )
+    }
+
+    private var endBinding: Binding<Date> {
+        Binding(
+            get: { customEndDate ?? Date() },
+            set: { newValue in
+                if let start = customStartDate, newValue < start {
+                    customEndDate = start
+                } else {
+                    customEndDate = newValue
+                }
+                debounceUpdateCustomRange()
+            }
+        )
+    }
+
+    private func customRangeSubtitle() -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "MMM d"
+        let start = customStartDate ?? Date()
+        let end = customEndDate ?? Date()
+        return "Custom range • \(f.string(from: start)) – \(f.string(from: end))"
+    }
+}
+
+// MARK: - Tile View (GlassCard style)
+
+struct StatsTileView: View {
+    @EnvironmentObject var appData: AppData
+
+    let tile: Tile
+    let range: DateInterval?
+    let isEditing: Bool
+
+    let onTap: () -> Void
+    let onMoveUp: () -> Void
+    let onMoveDown: () -> Void
+    let onToggleVisible: () -> Void
+    let onResize: () -> Void
+
+    private var height: CGFloat {
+        switch tile.size {
+        case .small: 220
+        case .medium: 300
+        case .large: 380
+        }
+    }
+
+    var body: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 14) {
+                if tile.kind != .summary {
+                    HStack {
+                        Label(titleFor(tile.kind), systemImage: iconFor(tile.kind))
+                            .font(.headline)
+                            .foregroundStyle(.white)
+                        Spacer()
+                        if isEditing {
+                            HStack(spacing: 10) {
+                                Button(action: onMoveUp) { Image(systemName: "chevron.up") }
+                                Button(action: onMoveDown) { Image(systemName: "chevron.down") }
+                                Button(action: onResize) { Image(systemName: "arrow.up.left.and.arrow.down.right") }
+                                Button(action: onToggleVisible) { Image(systemName: "eye.slash") }
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.white.opacity(0.7))
+                        }
+                    }
+                }
+
+                Group {
+                    switch tile.kind {
+                    case .summary:
+                        QuickSummaryCardRow(range: range)
+                            .frame(minHeight: height)
+                            .background(Color.clear)
+                            .clipShape(RoundedRectangle(cornerRadius: 20))
+                    case .weeklyProgress: WeeklyProgressChartRange(range: range).frame(height: height)
+                    case .strokeMix:      StrokeMixChartRange(range: range).frame(height: height)
+                    case .sectionShare:   SectionShareChartRange(range: range).frame(height: height)
+                    case .cumulativeYards:CumulativeYardsChart(range: range).frame(height: height)
+                    case .avgSetLength:   AverageSetLengthChartRange(range: range).frame(height: height)
+                    case .longestPractice:LongestPracticeTile(range: range).frame(minHeight: height)
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .onTapGesture {
+                    if !isEditing {
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) { onTap() }
+                    }
+                }
+            }
+        }
+        .shadow(color: .black.opacity(0.4), radius: 8, x: 0, y: 3)
+        .transition(.scale.combined(with: .opacity))
+    }
+
+    private func titleFor(_ k: TileKind) -> String {
+        switch k {
+        case .summary: return "Summary"
+        case .weeklyProgress: return "Weekly Progress"
+        case .strokeMix: return "Stroke Mix"
+        case .sectionShare: return "Section Share"
+        case .cumulativeYards: return "Cumulative Yardage"
+        case .avgSetLength: return "Avg Set Length"
+        case .longestPractice: return "Longest Practice"
+        }
+    }
+
+    private func iconFor(_ k: TileKind) -> String {
+        switch k {
+        case .summary: return "speedometer"
+        case .weeklyProgress: return "chart.bar"
+        case .strokeMix: return "circle.hexagonpath"
+        case .sectionShare: return "chart.pie"
+        case .cumulativeYards: return "chart.line.uptrend.xyaxis"
+        case .avgSetLength: return "point.3.connected.trianglepath.dotted"
+        case .longestPractice: return "flag.checkered"
+        }
+    }
+}
+
+// MARK: - Expanded Sheet + Manage Tiles
+
+struct ExpandedTileSheet: View {
+    let tile: Tile
+    let range: DateInterval?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 16) {
+                    switch tile.kind {
+                    case .summary:          QuickSummaryCardRow(range: range).frame(minHeight: 420)
+                    case .weeklyProgress:   WeeklyProgressChartRange(range: range).frame(height: 480)
+                    case .strokeMix:        StrokeMixChartRange(range: range).frame(height: 480)
+                    case .sectionShare:     SectionShareChartRange(range: range).frame(height: 480)
+                    case .cumulativeYards:  CumulativeYardsChart(range: range).frame(height: 480)
+                    case .avgSetLength:     AverageSetLengthChartRange(range: range).frame(height: 480)
+                    case .longestPractice:  LongestPracticeTile(range: range).frame(minHeight: 420)
+                    }
+                }
+                .padding()
+            }
+            .background(Color.black.ignoresSafeArea())
+            .navigationTitle("Details")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }.tint(.teal)
+                }
+            }
+        }
+    }
+}
+
+struct ManageTilesSheet: View {
+    @Binding var tiles: [Tile]
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Visible") {
+                    ForEach($tiles) { $tile in
+                        if tile.isVisible {
+                            HStack {
+                                Label(titleFor(tile.kind), systemImage: iconFor(tile.kind))
+                                Spacer()
+                                Picker("", selection: $tile.size) {
+                                    Text("S").tag(TileSize.small)
+                                    Text("M").tag(TileSize.medium)
+                                    Text("L").tag(TileSize.large)
+                                }
+                                .pickerStyle(.segmented)
+                                Button { tile.isVisible = false } label: {
+                                    Image(systemName: "eye.slash").foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    .onMove { from, to in tiles.move(fromOffsets: from, toOffset: to) }
+                }
+                Section("Hidden") {
+                    ForEach(TileKind.allCases, id: \.self) { kind in
+                        if !tiles.contains(where: { $0.kind == kind && $0.isVisible }) {
+                            Button {
+                                tiles.append(Tile(id: UUID(), kind: kind, isVisible: true, size: .medium))
+                            } label: {
+                                Label(titleFor(kind), systemImage: iconFor(kind))
+                            }
+                        }
+                    }
+                }
+            }
+            .environment(\.editMode, .constant(.active))
+            .navigationTitle("Manage Tiles")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
+            }
+        }
+    }
+
+    private func titleFor(_ kind: TileKind) -> String {
+        switch kind {
+        case .summary: return "Summary"
+        case .weeklyProgress: return "Weekly Progress"
+        case .strokeMix: return "Stroke Mix"
+        case .sectionShare: return "Section Share"
+        case .cumulativeYards: return "Cumulative Yardage"
+        case .avgSetLength: return "Avg Set Length"
+        case .longestPractice: return "Longest Practice"
+        }
+    }
+
+    private func iconFor(_ kind: TileKind) -> String {
+        switch kind {
+        case .summary: return "speedometer"
+        case .weeklyProgress: return "chart.bar"
+        case .strokeMix: return "circle.hexagonpath"
+        case .sectionShare: return "chart.pie"
+        case .cumulativeYards: return "chart.line.uptrend.xyaxis"
+        case .avgSetLength: return "point.3.connected.trianglepath.dotted"
+        case .longestPractice: return "flag.checkered"
+        }
+    }
+}
+
+// MARK: - Chart Components
+
+// MARK: - Compact Summary Row
+struct QuickSummaryCardRow: View {
+    @EnvironmentObject var appData: AppData
+    let range: DateInterval?
+
+    var body: some View {
+        let totalYards = Double(appData.totalYards(in: range))
+        let totalTime = appData.formattedSwimTime(in: range)
+        let sessions = appData.practiceCount(in: range)
+        let yardsPerMinute = appData.averageYardsPerMinute(in: range)
+        let streak = appData.currentStreak()
+
+        // Weekly goal integration
+        let goalYards = appData.weeklyGoal?.yardsTarget
+        let fallbackGoal = max(Int(totalYards), 1)   // if no goal set, keep ring sane
+        let weeklyGoal = Double(goalYards ?? fallbackGoal)
+        let progress = weeklyGoal > 0 ? min(totalYards / weeklyGoal, 1.0) : 0
+
+        VStack(alignment: .leading, spacing: 18) {
+            HStack {
+                Label("Summary", systemImage: "speedometer")
+                    .font(.headline)
+                    .foregroundStyle(.teal)
+                Spacer()
+                if sessions > 0 {
+                    Text("\(sessions) session\(sessions == 1 ? "" : "s")")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+            }
+
+            if sessions == 0 {
+                // Clear “no data” state
+                Text("No practices in this range yet.")
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.85))
+                Text("Log a practice from the Log tab to see your stats here.")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.7))
+            } else {
+                HStack(alignment: .firstTextBaseline, spacing: 24) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("\(Int(totalYards)) yds")
+                            .font(.system(size: 36, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                        Text("total distance")
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.7))
+                    }
+
+                    Spacer()
+
+                    ZStack {
+                        Circle().stroke(lineWidth: 10).opacity(0.15).foregroundStyle(.teal)
+                        Circle()
+                            .trim(from: 0, to: progress)
+                            .stroke(
+                                AngularGradient(colors: [.teal, .blue], center: .center),
+                                style: StrokeStyle(lineWidth: 10, lineCap: .round)
+                            )
+                            .rotationEffect(.degrees(-90))
+                            .animation(.easeOut(duration: 1.0), value: progress)
+                        Text("\(Int(progress * 100))%")
+                            .font(.subheadline.bold())
+                            .foregroundStyle(.white)
+                    }
+                    .frame(width: 80, height: 80)
+                }
+
+                Divider().background(.white.opacity(0.2))
+
+                Grid(horizontalSpacing: 16, verticalSpacing: 8) {
+                    GridRow {
+                        Label(totalTime, systemImage: "clock")
+                        Label(String(format: "%.1f yds/min", yardsPerMinute),
+                              systemImage: "bolt.fill")
+                    }
+                    GridRow {
+                        Label("\(streak)-day streak", systemImage: "flame.fill")
+                        if let goal = goalYards {
+                            Label("\(max(0, goal - Int(totalYards))) yds to goal",
+                                  systemImage: "target")
+                        } else {
+                            Label("Set a weekly goal", systemImage: "target")
+                        }
+                    }
+                }
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.8))
+                .symbolRenderingMode(.hierarchical)
+            }
+        }
+        .padding()
+        .background(
+            LinearGradient(colors: [.blue.opacity(0.25), .black.opacity(0.8)],
+                           startPoint: .topLeading, endPoint: .bottomTrailing)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 20))
+        .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 4)
+    }
+}
+
+struct WeeklyProgressChartRange: View {
+    @EnvironmentObject var appData: AppData
+    let range: DateInterval?
+
+    private let weekDays: [String] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+    // Compute chart data
+    private var chartData: (completeWeek: [Double], maxYards: Double) {
+        let buckets = appData.weeklyBuckets(in: range) // [WeeklyDayTotal]
+
+        var dayMap: [String: Double] = [:]
+        for b in buckets {
+            dayMap[b.label, default: 0] += Double(b.totalYards)
+        }
+
+        let completeWeek = weekDays.map { dayMap[$0] ?? 0 }
+        let maxYards = (completeWeek.max() ?? 0) * 1.15
+        return (completeWeek, maxYards)
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let completeWeek = chartData.completeWeek
+            let maxYards = chartData.maxYards
+
+            VStack(alignment: .leading, spacing: 8) {
+                Chart {
+                    ForEach(Array(weekDays.enumerated()), id: \.offset) { index, label in
+                        BarMark(
+                            x: .value("Day", label),
+                            y: .value("Yards", completeWeek[index])
+                        )
+                        .foregroundStyle(.teal.gradient)
+                        .cornerRadius(6)
+                        .annotation(position: .top) {
+                            if completeWeek[index] > 0 {
+                                Text("\(Int(completeWeek[index]))")
+                                    .font(.caption2.bold())
+                                    .foregroundStyle(.white)
+                            }
+                        }
+                    }
+                }
+                .chartYScale(domain: 0...maxYards)
+                .chartYAxis {
+                    AxisMarks(position: .leading) { value in
+                        AxisGridLine().foregroundStyle(.white.opacity(0.15))
+                        AxisValueLabel {
+                            if let val = value.as(Double.self) {
+                                Text("\(Int(val))")
+                                    .foregroundStyle(.white.opacity(0.7))
+                                    .font(.caption2)
+                            }
+                        }
+                    }
+                }
+                .chartXAxis {
+                    AxisMarks(values: weekDays) { value in
+                        AxisValueLabel {
+                            if let day = value.as(String.self) {
+                                Text(day)
+                                    .foregroundStyle(.white.opacity(0.8))
+                                    .font(.caption)
+                            }
+                        }
+                    }
+                }
+                .chartYAxisLabel("Total Yards", position: .leading)
+                .chartXAxisLabel("Day of Week", alignment: .center)
+                .frame(width: geo.size.width, height: geo.size.height)
+                .padding(.horizontal, 6)
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+        }
+    }
+}
+
+struct StrokeMixChartRange: View {
+    @EnvironmentObject var appData: AppData
+    let range: DateInterval?
+
+    // Sum stroke yardages across practices in range
+    private func strokeTotals(in range: DateInterval?) -> [(key: String, value: Double)] {
+        guard let range = range else { return [] }
+        let formatter = ISO8601DateFormatter()
+
+        let practicesInRange = appData.loggedPractices.filter { p in
+            guard let date = formatter.date(from: p.date) else { return false }
+            return range.contains(date)
+        }
+
+        var totals: [String: Double] = [:]
+        for practice in practicesInRange {
+            for item in strokeYardsForPractice(practice) {
+                totals[item.key, default: 0] += item.value
+            }
+        }
+
+        return totals
+            .filter { $0.value > 0 }
+            .sorted { $0.value > $1.value }
+    }
+
+    var body: some View {
+        let mix = strokeTotals(in: range)
+        let totalYards = mix.map(\.value).reduce(0, +)
+
+        VStack(spacing: 14) {
+            Chart(mix, id: \.key) { item in
+                SectorMark(
+                    angle: .value("Yards", item.value),
+                    innerRadius: .ratio(0.4)
+                )
+                .foregroundStyle(colorForStroke(item.key))
+            }
+            .aspectRatio(1, contentMode: .fit)
+            .frame(maxHeight: 250)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .chartLegend(.hidden)
+
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(mix, id: \.key) { item in
+                    let percent = totalYards > 0 ? (item.value / totalYards) * 100 : 0
+                    HStack(spacing: 8) {
+                        Circle().fill(colorForStroke(item.key)).frame(width: 10, height: 10)
+                        Text(item.key.capitalized).font(.caption).foregroundStyle(.white)
+                        Spacer()
+                        Text("\(Int(item.value)) yds").font(.caption2).foregroundStyle(.white.opacity(0.7))
+                        Text(String(format: "%.0f%%", percent)).font(.caption2).foregroundStyle(.white.opacity(0.7))
+                    }
+                }
+            }
+            .padding(.horizontal, 4)
+        }
+        .padding(.vertical, 6)
+    }
+}
+
+// MARK: - Section Share Chart
+
+struct SectionShareChartRange: View {
+    @EnvironmentObject var appData: AppData
+    let range: DateInterval?
+
+    private func sectionTotals(in range: DateInterval?) -> [(key: String, value: Double)] {
+        guard let range = range else { return [] }
+        let formatter = ISO8601DateFormatter()
+
+        let practicesInRange = appData.loggedPractices.filter { p in
+            guard let date = formatter.date(from: p.date) else { return false }
+            return range.contains(date)
+        }
+
+        var totals: [String: Double] = [:]
+        for practice in practicesInRange {
+            for (section, yards) in practice.sectionYards {
+                totals[section, default: 0] += Double(yards)
+            }
+        }
+
+        return totals.filter { $0.value > 0 }.sorted { $0.value > $1.value }
+    }
+
+    var body: some View {
+        let data = sectionTotals(in: range)
+        let totalYards = data.map(\.value).reduce(0, +)
+
+        VStack(spacing: 14) {
+            Chart(data, id: \.key) { item in
+                SectorMark(angle: .value("Yards", item.value), innerRadius: .ratio(0.4))
+                    .foregroundStyle(tintForSection(item.key))
+            }
+            .aspectRatio(1, contentMode: .fit)
+            .frame(maxHeight: 250)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .chartLegend(.hidden)
+
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(data, id: \.key) { item in
+                    let percent = totalYards > 0 ? (item.value / totalYards) * 100 : 0
+                    HStack(spacing: 8) {
+                        Circle().fill(tintForSection(item.key)).frame(width: 10, height: 10)
+                        Text(item.key.capitalized).font(.caption).foregroundStyle(.white)
+                        Spacer()
+                        Text("\(Int(item.value)) yds").font(.caption2).foregroundStyle(.white.opacity(0.7))
+                        Text(String(format: "%.0f%%", percent)).font(.caption2).foregroundStyle(.white.opacity(0.7))
+                    }
+                }
+            }
+            .padding(.horizontal, 4)
+        }
+        .padding(.vertical, 6)
+    }
+}
+
+struct CumulativeYardsChart: View {
+    @EnvironmentObject var appData: AppData
+    let range: DateInterval?
+
+    var body: some View {
+        let data = appData.cumulativeYards(in: range)
+        let total = data.last?.yards ?? 0
+        let goal: Double = 20_000
+
+        VStack(alignment: .leading, spacing: 12) {
+            Chart {
+                ForEach(data) { p in
+                    LineMark(x: .value("Date", p.date), y: .value("Yards", p.yards))
+                        .lineStyle(StrokeStyle(lineWidth: 3))
+                        .foregroundStyle(.teal)
+
+                    AreaMark(x: .value("Date", p.date), y: .value("Yards", p.yards))
+                        .foregroundStyle(LinearGradient(colors: [.teal.opacity(0.3), .clear],
+                                                       startPoint: .top, endPoint: .bottom))
+
+                    PointMark(x: .value("Date", p.date), y: .value("Yards", p.yards))
+                        .foregroundStyle(.white)
+                }
+
+                RuleMark(y: .value("Goal", goal))
+                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [6]))
+                    .foregroundStyle(.white.opacity(0.35))
+            }
+            .chartYAxis {
+                AxisMarks(position: .leading) {
+                    AxisGridLine().foregroundStyle(.white.opacity(0.08))
+                    AxisValueLabel().font(.caption).foregroundStyle(.white.opacity(0.7))
+                }
+            }
+            .chartXAxis {
+                AxisMarks(values: .automatic(desiredCount: 6)) { value in
+                    AxisGridLine().foregroundStyle(.white.opacity(0.05))
+                    AxisValueLabel {
+                        if let date = value.as(Date.self) {
+                            Text(date, format: .dateTime.day().month(.abbreviated))
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.75))
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 4)
+            .frame(height: 220)
+            .chartLegend(.hidden)
+
+            HStack {
+                Text("Total: \(Int(total)) yds").font(.caption).foregroundStyle(.white.opacity(0.85))
+                Spacer()
+                Text("Goal: \(Int(goal)) yds").font(.caption).foregroundStyle(.white.opacity(0.6))
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+struct AverageSetLengthChartRange: View {
+    @EnvironmentObject var appData: AppData
+    let range: DateInterval?
+    @State private var showInfo = false
+
+    var body: some View {
+        let data = appData.avgSetLengthOverTime(in: range)
+        let avg = data.map { Double($0.avgYards) }.average ?? 0
+        let first = Double(data.first?.avgYards ?? 0)
+        let last = Double(data.last?.avgYards ?? 0)
+        let trend = last - first
+        let percentChange = first != 0 ? (trend / first) * 100 : 0
+
+        let trendColor: Color = percentChange > 5 ? .green : (percentChange < -5 ? .red : .orange)
+        let trendText: String = percentChange > 5
+            ? "Up \(Int(percentChange))% from start"
+            : (percentChange < -5 ? "Down \(abs(Int(percentChange)))% from start" : "Holding steady")
+
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                HStack(spacing: 6) {
+                    Image(systemName: "waveform.path.ecg").foregroundStyle(trendColor)
+                    Text(trendText).font(.subheadline.weight(.medium)).foregroundStyle(trendColor)
+                }
+                Spacer()
+                Button { showInfo.toggle() } label: {
+                    Image(systemName: "info.circle").font(.subheadline).foregroundStyle(.white.opacity(0.7))
+                }
+                .buttonStyle(.plain)
+                .popover(isPresented: $showInfo, arrowEdge: .top) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Average Set Length").font(.headline).foregroundStyle(.white)
+                        Text("This chart shows how your average swim set distance changes over time. Increases may indicate stronger endurance or more intense sessions.")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.8))
+                            .frame(maxWidth: 260)
+                    }
+                    .padding()
+                    .background(Color.black.opacity(0.85))
+                    .cornerRadius(12)
+                    .frame(width: 280)
+                }
+            }
+
+            Chart {
+                ForEach(data) { p in
+                    LineMark(x: .value("Date", p.date), y: .value("Avg", Double(p.avgYards)))
+                        .interpolationMethod(.catmullRom)
+                        .lineStyle(StrokeStyle(lineWidth: 3))
+                        .foregroundStyle(trendColor)
+
+                    AreaMark(x: .value("Date", p.date), y: .value("Avg", Double(p.avgYards)))
+                        .foregroundStyle(LinearGradient(colors: [trendColor.opacity(0.25), .clear],
+                                                       startPoint: .top, endPoint: .bottom))
+                }
+                PointMark(x: .value("Date", data.last?.date ?? Date()),
+                          y: .value("Avg", Double(data.last?.avgYards ?? 0)))
+                .foregroundStyle(.white)
+            }
+            .chartXAxis {
+                AxisMarks(values: .stride(by: .day)) { value in
+                    if let date = value.as(Date.self) {
+                        AxisValueLabel {
+                            Text(date, format: .dateTime.day().month(.abbreviated))
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(0.7))
+                        }
+                    }
+                }
+            }
+            .chartYAxis {
+                AxisMarks(position: .leading) {
+                    AxisGridLine().foregroundStyle(.white.opacity(0.1))
+                    AxisValueLabel().font(.caption2).foregroundStyle(.white.opacity(0.6))
+                }
+            }
+            .frame(height: 200)
+
+            Text("Average set length this period: **\(Int(avg)) yds**")
+                .font(.footnote)
+                .foregroundStyle(.white.opacity(0.8))
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+struct LongestPracticeTile: View {
+    @EnvironmentObject var appData: AppData
+    let range: DateInterval?
+
+    var topPractices: [(AnalyzedPractice, Date)] {
+        let formatter = ISO8601DateFormatter()
+        let pairs = appData.loggedPractices.compactMap { p -> (AnalyzedPractice, Date)? in
+            guard let date = formatter.date(from: p.date) else { return nil }
+            return (p, date)
+        }
+        .filter { pair in
+            let (_, date) = pair
+            if let range = range { return range.contains(date) }
+            return true
+        }
+        .sorted { $0.0.distanceYards > $1.0.distanceYards }
+        .prefix(5)
+
+        return Array(pairs)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("Longest Practices", systemImage: "trophy.fill")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                Spacer()
+                if !topPractices.isEmpty {
+                    Text("\(topPractices.count) shown")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.5))
+                }
+            }
+
+            if topPractices.isEmpty {
+                Text("No practices logged yet")
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.6))
+                    .frame(maxWidth: .infinity, minHeight: 120)
+                    .multilineTextAlignment(.center)
+            } else {
+                VStack(spacing: 10) {
+                    ForEach(Array(topPractices.enumerated()), id: \.offset) { index, pair in
+                        let practice = pair.0
+                        let date = pair.1
+
+                        HStack {
+                            Text(rankEmoji(for: index))
+                                .font(.title3)
+                                .frame(width: 32, alignment: .center)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(date.formatted(.dateTime.weekday(.abbreviated).month().day()))
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(.white)
+                                Text(practice.aiSummary.isEmpty ? "Logged Session" : practice.aiSummary)
+                                    .font(.caption)
+                                    .lineLimit(1)
+                                    .foregroundStyle(.white.opacity(0.6))
+                            }
+
+                            Spacer()
+
+                            Text("\(practice.distanceYards.formatted()) yds")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(colorForRank(index))
+                        }
+                        .padding(.vertical, 6)
+                        .padding(.horizontal, 8)
+                        .background(Color.white.opacity(0.05))
+                        .cornerRadius(10)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func rankEmoji(for index: Int) -> String {
+        switch index {
+        case 0: return "🥇"
+        case 1: return "🥈"
+        case 2: return "🥉"
+        default: return "\(index + 1)."
+        }
+    }
+
+    private func colorForRank(_ index: Int) -> Color {
+        switch index {
+        case 0: return .yellow
+        case 1: return .gray
+        case 2: return .orange
+        default: return .teal
+        }
+    }
+}
+
+// MARK: - Empty State
+
+private struct EmptyState: View {
+    let onAdd: () -> Void
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "rectangle.grid.2x2")
+                .font(.system(size: 44))
+                .foregroundStyle(.white.opacity(0.6))
+            Text("No tiles visible").font(.headline).foregroundStyle(.white)
+            Text("Use Manage Tiles to add cards back to your dashboard.")
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.7))
+                .multilineTextAlignment(.center)
+            Button(action: onAdd) { Label("Add tiles", systemImage: "plus") }
+                .buttonStyle(.borderedProminent)
+                .tint(.teal)
+        }
+        .padding(24)
+        .background(Color.teal.opacity(0.15))
+        .clipShape(RoundedRectangle(cornerRadius: 18))
+        .shadow(color: .black.opacity(0.4), radius: 6, x: 0, y: 3)
+    }
+}
+
+// MARK: - Color & Stroke Mix helpers
+
+func tintForSection(_ name: String) -> Color {
+    switch name.lowercased() {
+    case "warmup": return .blue
+    case "preset", "pre-set": return .orange
+    case "main", "main set": return .red
+    case "post-set", "post": return .purple
+    case "cooldown", "cool down": return .green
+    default: return .gray
+    }
+}
+
+func colorForStroke(_ name: String) -> Color {
+    let n = name.lowercased()
+    switch n {
+    case _ where n.contains("free"):   return .blue
+    case _ where n.contains("kick"):   return .yellow
+    case _ where n.contains("back"):   return .teal
+    case _ where n.contains("breast"): return .green
+    case _ where n.contains("fly"):    return .purple
+    case _ where n.contains("im"):     return .orange
+    case _ where n.contains("drill"):  return .pink
+    case _ where n.contains("pull"):   return .mint
+    case _ where n.contains("choice"): return .red
+    case _ where n.contains("swim"):   return .cyan
+    default:                           return .gray.opacity(0.6)
+    }
+}
+
+/// Shared helper: compute stroke yardage for a single practice from `strokePercentages`.
+/// Normalizes percentages so they always sum to 100.
+func strokeYardsForPractice(_ practice: AnalyzedPractice) -> [(key: String, value: Double)] {
+    let dict = practice.strokePercentages
+    guard !dict.isEmpty, practice.distanceYards > 0 else {
+        return []
+    }
+
+    // Clean and clamp percentages
+    var cleaned: [(String, Double)] = []
+    for (stroke, percent) in dict {
+        guard percent.isFinite else { continue }
+        let clamped = max(0, min(percent, 100))
+        if clamped <= 0 { continue }
+        cleaned.append((stroke, clamped))
+    }
+
+    let totalPercent = cleaned.map { $0.1 }.reduce(0, +)
+    guard totalPercent > 0 else { return [] }
+
+    let totalYards = Double(practice.distanceYards)
+    var totals: [String: Double] = [:]
+
+    for (stroke, p) in cleaned {
+        let fraction = p / totalPercent
+        let yards = totalYards * fraction
+        totals[stroke, default: 0] += yards
+    }
+
+    return totals
+        .filter { $0.value > 0 }
+        .sorted { $0.value > $1.value }
+}
+
+// MARK: - Helper Extension
+
+extension Collection where Element == Double {
+    var average: Double? {
+        guard !isEmpty else { return nil }
+        return reduce(0, +) / Double(count)
+    }
+}
+
+// MARK: - Range-Aware Stats Helpers (local models to avoid conflicts)
+
+struct WeeklyDayTotal: Identifiable {
+    let id = UUID()
+    let label: String       // "Mon", "Tue", ...
+    let totalYards: Int
+}
+
+struct CumulativePoint: Identifiable {
+    var id: Date { date }
+    var date: Date
+    var yards: Double
+}
+
+/// Small DTO for weekday charts (Mon→Sun)
+struct WeekdayAvg: Identifiable {
+    let id = UUID()
+    let label: String      // "Mon", "Tue", ...
+    let avgYards: Double   // use Double for Charts
+}
+
+extension AppData {
+
+    /// 1) Weekly buckets filtered by a given range (Mon→Sun labels)
+    func weeklyBuckets(in interval: DateInterval?) -> [WeeklyDayTotal] {
+        let cal = Calendar.monday
+        let fmt = ISO8601DateFormatter()
+
+        let filtered = loggedPractices.compactMap { p -> (Date, Int)? in
+            guard let d = fmt.date(from: p.date) else { return nil }
+            guard interval?.contains(d) ?? true else { return nil }
+            return (d, p.distanceYards)
+        }
+
+        var map: [String: Int] = [:]
+        for (date, yards) in filtered {
+            let weekdayIndex = cal.component(.weekday, from: date) // Sun=1 ... Sat=7
+            let labels = cal.weekdaySymbols
+            // rotate to Mon-first
+            let monFirst = Array(labels[1...] + labels[..<1]).map { String($0.prefix(3)) }
+            let label = monFirst[(weekdayIndex + 5) % 7] // map Sun(1)→index 6, Mon(2)→0, ...
+            map[label, default: 0] += yards
+        }
+
+        let order = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+        return order.map { WeeklyDayTotal(label: $0, totalYards: map[$0] ?? 0) }
+    }
+
+    /// 2) Cumulative yard totals over time (for line chart)
+    func cumulativeYards(in interval: DateInterval?) -> [CumulativePoint] {
+        let fmt = ISO8601DateFormatter()
+        let sorted = loggedPractices.compactMap { p -> (Date, Int)? in
+            guard let d = fmt.date(from: p.date) else { return nil }
+            guard interval?.contains(d) ?? true else { return nil }
+            return (d, p.distanceYards)
+        }
+        .sorted { $0.0 < $1.0 }
+
+        var running = 0
+        return sorted.map { (d, y) in
+            running += y
+            return CumulativePoint(date: d, yards: Double(running))
+        }
+    }
+
+    /// 3) Average set length over time
+    func avgSetLengthOverTime(in interval: DateInterval?) -> [PracticePoint] {
+        let fmt = ISO8601DateFormatter()
+        let filtered = loggedPractices.filter { p in
+            guard let d = fmt.date(from: p.date) else { return false }
+            return interval?.contains(d) ?? true
+        }
+
+        return filtered.compactMap { p in
+            guard let d = fmt.date(from: p.date) else { return nil }
+            let sections = max(1, p.sectionYards.count)
+            return PracticePoint(date: d, avgYards: p.distanceYards / sections)
+        }
+        .sorted { $0.date < $1.date }
+    }
+
+    /// 4) Average yards by weekday (Mon→Sun) – used by WeekdayVolumeChart if needed
+    func averageYardsByWeekday(in interval: DateInterval?) -> [WeekdayAvg] {
+        let cal = Calendar.monday
+        let fmt = ISO8601DateFormatter()
+
+        var sums: [Int: (total: Int, count: Int)] = [:] // weekdayIndex: (sum, n)
+
+        for p in loggedPractices {
+            guard let d = fmt.date(from: p.date) else { continue }
+            if let intv = interval, !intv.contains(d) { continue }
+            let w = cal.component(.weekday, from: d) // Sun=1...Sat=7
+            sums[w, default: (0,0)].total += p.distanceYards
+            sums[w, default: (0,0)].count += 1
+        }
+
+        // Build Mon-first labels
+        let labels = cal.weekdaySymbols
+        let monFirst = Array(labels[1...] + labels[..<1]).map { String($0.prefix(3)) }
+
+        // Convert Sun=1..Sat=7 to Mon-first indices 0..6
+        func labelFor(_ weekday: Int) -> String { monFirst[(weekday + 5) % 7] }
+
+        let result: [WeekdayAvg] = (1...7).map { w in
+            let s = sums[w] ?? (0,0)
+            let avg = s.count > 0 ? Double(s.total) / Double(s.count) : 0
+            return WeekdayAvg(label: labelFor(w), avgYards: avg)
+        }
+
+        // Order Mon→Sun
+        let order = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+        return result.sorted { order.firstIndex(of: $0.label)! < order.firstIndex(of: $1.label)! }
+    }
+}
