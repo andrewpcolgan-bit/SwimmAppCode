@@ -1,0 +1,536 @@
+//
+//  PracticeDetailView.swift
+//  SwimSetTracker
+//
+
+import SwiftUI
+import Charts
+import UIKit
+import PDFKit
+
+// Drive .sheet(item:) with a URL
+extension URL: Identifiable {
+    public var id: String { path }
+}
+
+struct PracticeDetailView: View {
+    @EnvironmentObject var appData: AppData
+    let practice: AnalyzedPractice
+
+    @State private var isEditing = false
+    @State private var editedDate = Date()
+    @State private var editedDuration = 0
+    @State private var editedTimeOfDay = "AM"
+
+    // PDF viewer state (item-driven)
+    @State private var selectedPDFURL: URL? = nil
+
+    // Recovery sheet
+    @State private var showRecoverySheet = false
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 18) {
+                headerCard
+                practiceFocusCard
+
+                if !practice.sectionYards.isEmpty {
+                    sectionBreakdownCard
+                }
+
+                strokeMixCard
+
+                // Short recovery preview card
+                if let _ = practice.recoverySuggestions ?? practice.aiTip {
+                    recoveryPreviewCard
+                }
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 16)
+        }
+        .navigationTitle("Practice Detail")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button("Edit") {
+                    if let d = ISO8601DateFormatter().date(from: practice.date) {
+                        editedDate = d
+                    }
+                    editedDuration = practice.durationMinutes
+                    editedTimeOfDay = practice.timeOfDay ?? "AM"
+                    isEditing = true
+                }
+            }
+        }
+        .sheet(isPresented: $isEditing) {
+            EditPracticeSheet(
+                practice: practice,
+                date: $editedDate,
+                duration: $editedDuration,
+                timeOfDay: $editedTimeOfDay,
+                onSave: { newDate, newDuration, newTimeOfDay in
+                    updatePractice(newDate: newDate, newDuration: newDuration, newTimeOfDay: newTimeOfDay)
+                }
+            )
+            .presentationDetents([.medium])
+        }
+        // PDF Viewer Sheet (item-based)
+        .sheet(item: $selectedPDFURL) { url in
+            PDFViewer(url: url)
+                .ignoresSafeArea()
+        }
+        // Full-screen recovery suggestions page
+        .sheet(isPresented: $showRecoverySheet) {
+            RecoverySuggestionsView(
+                practiceTitle: formattedPracticeTitle,
+                focusText: practiceFocusText,
+                practiceTag: practice.practiceTag,
+                suggestionsText: (practice.recoverySuggestions ?? practice.aiTip) ?? ""
+            )
+        }
+        .background(Color.black.ignoresSafeArea())
+    }
+
+    // Convenience title for recovery page
+    private var formattedPracticeTitle: String {
+        if let date = ISO8601DateFormatter().date(from: practice.date) {
+            return date.formatted(.dateTime.weekday(.wide).month().day().year())
+        }
+        return "Swim Practice"
+    }
+
+    // MARK: - Header Card
+    private var headerCard: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Practice Summary", systemImage: "sportscourt")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+
+                if let date = ISO8601DateFormatter().date(from: practice.date) {
+                    Text(date.formatted(.dateTime.weekday(.wide).month().day().year()))
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+
+                Text("\(practice.distanceYards) yds • \(practice.durationMinutes) min")
+                    .font(.title3.bold())
+                    .foregroundStyle(.white)
+            }
+        }
+    }
+
+    // MARK: - Practice Focus Card
+    private var practiceFocusCard: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Practice Focus", systemImage: "sparkles")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+
+                Text(practiceFocusText)
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.8))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.vertical, 8)
+        }
+    }
+
+    /// Picks the best one-liner to show as "Practice Focus".
+    /// Priority:
+    ///   1. practiceTag (from backend)
+    ///   2. aiSummary (from backend)
+    ///   3. Friendly fallback
+    private var practiceFocusText: String {
+        if let tag = practice.practiceTag?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !tag.isEmpty,
+           !tag.lowercased().hasPrefix("no summary"),
+           !tag.lowercased().hasPrefix("none") {
+            return tag
+        }
+
+        let summary = practice.aiSummary
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !summary.isEmpty,
+           !summary.lowercased().hasPrefix("no summary") {
+            return summary
+        }
+
+        return "Focus not detected for this practice yet."
+    }
+
+    // MARK: - Section Breakdown + PDF Preview
+    private var sectionBreakdownCard: some View {
+        let sectionOrder = ["Warmup", "Preset", "Main Set", "Post-Set", "Cooldown"]
+        let orderedSections = practice.sectionYards.sorted { a, b in
+            let i1 = sectionOrder.firstIndex(where: { $0.caseInsensitiveCompare(a.key) == .orderedSame }) ?? Int.max
+            let i2 = sectionOrder.firstIndex(where: { $0.caseInsensitiveCompare(b.key) == .orderedSame }) ?? Int.max
+            return i1 < i2
+        }
+
+        return GlassCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Section Breakdown", systemImage: "list.clipboard")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+
+                ForEach(Array(orderedSections), id: \.key) { section in
+                    HStack {
+                        Text(section.key)
+                            .font(.subheadline)
+                            .foregroundColor(.white)
+                        Spacer()
+                        Text("\(section.value) yds")
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.85))
+                    }
+                    Divider().background(Color.white.opacity(0.1))
+                }
+
+                // Inline PDF Preview
+                let pdfURL = appData.pdfURL(for: practice.id)
+                if FileManager.default.fileExists(atPath: pdfURL.path) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Original Practice Sheet", systemImage: "doc.richtext")
+                            .font(.headline)
+                            .foregroundStyle(.white)
+
+                        PDFThumbnailView(url: pdfURL)
+                            .frame(height: 360)
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .contentShape(Rectangle())
+                            .onTapGesture { selectedPDFURL = pdfURL }
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Stroke Mix (per-practice)
+    private var strokeMixCard: some View {
+        let mix = strokeYardsForPractice(practice)
+        let totalYards = mix.map(\.value).reduce(0, +)
+
+        return GlassCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Stroke Mix", systemImage: "chart.pie.fill")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+
+                if mix.isEmpty {
+                    Text("No stroke data for this practice.")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.7))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    VStack(spacing: 14) {
+                        Chart(mix, id: \.key) { item in
+                            SectorMark(
+                                angle: .value("Yards", item.value),
+                                innerRadius: .ratio(0.4)
+                            )
+                            .foregroundStyle(colorForStroke(item.key))
+                        }
+                        .aspectRatio(1, contentMode: .fit)
+                        .frame(maxHeight: 250)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .chartLegend(.hidden)
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(mix, id: \.key) { item in
+                                let percent = totalYards > 0 ? (item.value / totalYards) * 100 : 0
+                                HStack(spacing: 8) {
+                                    Circle()
+                                        .fill(colorForStroke(item.key))
+                                        .frame(width: 10, height: 10)
+
+                                    Text(item.key.capitalized)
+                                        .font(.caption)
+                                        .foregroundStyle(.white)
+
+                                    Spacer()
+
+                                    Text("\(Int(item.value)) yds")
+                                        .font(.caption2)
+                                        .foregroundStyle(.white.opacity(0.7))
+
+                                    Text(String(format: "%.0f%%", percent))
+                                        .font(.caption2)
+                                        .foregroundStyle(.white.opacity(0.7))
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 4)
+                    }
+                    .padding(.vertical, 6)
+                }
+            }
+        }
+    }
+
+    // MARK: - Recovery Preview Card (on Practice Detail)
+    private var recoveryPreviewCard: some View {
+        let raw = (practice.recoverySuggestions ?? practice.aiTip) ?? ""
+        let stretches = parseStretchLines(raw)
+        let count = stretches.count
+        let minutes = max(1, Int(round(Double(count) * 1.5))) // simple estimate
+        let focusAreas = summaryAreas(from: stretches)
+
+        return GlassCard {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Recovery & Stretches", systemImage: "figure.cooldown")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+
+                Text("Recovery focus: \(focusAreas)")
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.8))
+
+                Text("Suggested: \(count) stretch\(count == 1 ? "" : "es") · ~\(minutes) min")
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.8))
+
+                HStack {
+                    Spacer()
+                    Button {
+                        showRecoverySheet = true
+                    } label: {
+                        Text("View full recovery plan")
+                            .font(.footnote.weight(.semibold))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(Color.white.opacity(0.12), in: Capsule())
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Preview Parsing Helpers (lightweight)
+
+    private struct PreviewStretch {
+        let areas: [String]
+    }
+
+    private func parseStretchLines(_ text: String) -> [PreviewStretch] {
+        let lines = text
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        return lines.compactMap { line in
+            // Strip leading bullets
+            var core = line
+            if core.hasPrefix("- ") {
+                core.removeFirst(2)
+            } else if core.hasPrefix("• ") {
+                core.removeFirst(2)
+            }
+
+            // Pull "(Areas...)" from the header portion
+            guard let open = core.firstIndex(of: "("),
+                  let close = core.firstIndex(of: ")"),
+                  close > open
+            else {
+                return PreviewStretch(areas: [])
+            }
+
+            let inside = core[core.index(after: open)..<close]
+            let parts = inside
+                .split(separator: ",")
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+
+            return PreviewStretch(areas: parts)
+        }
+    }
+
+    private func summaryAreas(from stretches: [PreviewStretch]) -> String {
+        let allAreas = stretches
+            .flatMap { $0.areas }
+            .map { $0.lowercased() }
+
+        let unique = Array(Set(allAreas)).sorted()
+        if unique.isEmpty { return "full body" }
+        if unique.count <= 3 { return unique.joined(separator: ", ") }
+        return unique.prefix(3).joined(separator: ", ") + "…"
+    }
+
+    // MARK: - Helpers
+
+    private func updatePractice(newDate: Date, newDuration: Int, newTimeOfDay: String) {
+        guard let idx = appData.loggedPractices.firstIndex(where: { $0.id == practice.id }) else { return }
+        var updated = appData.loggedPractices[idx]
+        updated = AnalyzedPractice(
+            id: updated.id,
+            date: ISO8601DateFormatter().string(from: newDate),
+            formattedText: updated.formattedText,
+            aiSummary: updated.aiSummary,
+            distanceYards: updated.distanceYards,
+            durationMinutes: newDuration,
+            sectionYards: updated.sectionYards,
+            strokePercentages: updated.strokePercentages,
+            aiTip: updated.aiTip,
+            timeOfDay: newTimeOfDay,
+            practiceTag: updated.practiceTag,
+            recoverySuggestions: updated.recoverySuggestions
+        )
+        appData.loggedPractices[idx] = updated
+        appData.saveToDisk()
+        appData.filterToCurrentWeek()
+    }
+}
+
+// MARK: - Edit Sheet Component
+
+struct EditPracticeSheet: View {
+    let practice: AnalyzedPractice
+    @Binding var date: Date
+    @Binding var duration: Int
+    @Binding var timeOfDay: String
+    var onSave: (Date, Int, String) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Practice Info") {
+                    DatePicker("Date", selection: $date, displayedComponents: .date)
+                    Stepper("Duration: \(duration) min", value: $duration, in: 0...300, step: 15)
+                    Picker("Time of Day", selection: $timeOfDay) {
+                        Text("Morning (AM)").tag("AM")
+                        Text("Afternoon (PM)").tag("PM")
+                        Text("Evening").tag("Evening")
+                    }
+                    .pickerStyle(.segmented)
+                }
+            }
+            .navigationTitle("Edit Practice")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        onSave(date, duration, timeOfDay)
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - PDF Viewer + Helpers
+
+struct PDFViewer: View {
+    let url: URL
+    @Environment(\.dismiss) private var dismiss
+    @State private var document: PDFDocument? = nil
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let doc = document {
+                    PDFKitRepresentedView(document: doc)
+                        .ignoresSafeArea(edges: .bottom)
+                } else {
+                    ProgressView("Loading PDF…")
+                }
+            }
+            .navigationTitle(url.deletingPathExtension().lastPathComponent)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItemGroup(placement: .primaryAction) {
+                    ShareLink(item: url) {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                    Button {
+                        printPDF(at: url)
+                    } label: {
+                        Image(systemName: "printer")
+                    }
+                    .accessibilityLabel("Print")
+                }
+            }
+        }
+        .onAppear { document = PDFDocument(url: url) }
+    }
+
+    private func printPDF(at url: URL) {
+        guard let data = try? Data(contentsOf: url) else { return }
+        let info = UIPrintInfo(dictionary: nil)
+        info.outputType = .general
+        info.jobName = url.lastPathComponent
+
+        let controller = UIPrintInteractionController.shared
+        controller.printInfo = info
+        controller.showsNumberOfCopies = true
+        controller.printingItem = data
+        controller.present(animated: true, completionHandler: nil)
+    }
+}
+
+struct PDFKitRepresentedView: UIViewRepresentable {
+    let document: PDFDocument
+
+    func makeUIView(context: Context) -> PDFView {
+        let v = PDFView()
+        v.autoScales = true
+        v.displayMode = .singlePageContinuous
+        v.displayDirection = .vertical
+        v.backgroundColor = .systemBackground
+        v.document = document
+        return v
+    }
+
+    func updateUIView(_ uiView: PDFView, context: Context) {
+        uiView.document = document
+    }
+}
+
+struct PDFThumbnailView: View {
+    let url: URL
+    @State private var image: UIImage?
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color(uiColor: .secondarySystemBackground))
+                    .overlay { ProgressView() }
+            }
+        }
+        .task {
+            image = await renderThumbnail(from: url)
+        }
+    }
+
+    private func renderThumbnail(from url: URL) async -> UIImage? {
+        await withCheckedContinuation { cont in
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard
+                    let doc = PDFDocument(url: url),
+                    let page = doc.page(at: 0)
+                else { return cont.resume(returning: nil) }
+
+                let rect = page.bounds(for: .mediaBox)
+                let scale: CGFloat = 0.4
+                let size = CGSize(width: rect.width * scale, height: rect.height * scale)
+                let img = page.thumbnail(of: size, for: .mediaBox)
+                cont.resume(returning: img)
+            }
+        }
+    }
+}
